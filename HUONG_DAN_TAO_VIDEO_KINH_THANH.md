@@ -21,7 +21,7 @@ Tài liệu này cung cấp kịch bản mẫu hoàn chỉnh và hướng dẫn 
 4. Bấm nút **"Thêm dự án"** (Add project):
    - **Tên dự án:** `Chúa Dẹp Yên Bão Tố - Biển Hồ Galilee`
    - **Link Google Flow:** Dán link hoặc UUID bạn vừa copy.
-   - **Chất liệu hình ảnh (Material):** Chọn `realistic` (Chân thực điện ảnh).
+   - **Chất liệu hình ảnh (Material):** Chọn **Photorealistic** (Chân thực điện ảnh người thật) hoặc **Oil Painting** (Tranh sơn dầu cổ điển thời Phục Hưng).
 5. Bấm **Xác nhận tạo**.
 
 ---
