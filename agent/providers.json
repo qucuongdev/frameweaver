@@ -3,8 +3,8 @@
   "roles": {
     "video_review": {
       "provider": "codex",
-      "model": "gpt-6-luna",
-      "effort": "max"
+      "model": null,
+      "effort": null
     },
     "subtitle_translation": {
       "provider": "codex",

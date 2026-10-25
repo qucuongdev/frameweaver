@@ -248,16 +248,22 @@ async def prepare(vid, body, project, scenes, voices, update):
                 # to the measured voice rather than truncating or freezing its end.
                 timing = f"setpts={length/raw_info['duration']:.8f}*(PTS-STARTPTS)," if scene.motion_beats else ''
                 tail = '' if scene.motion_beats else ',tpad=stop_mode=clone:stop_duration=90'
+                preset = next((p for p in studio.PRESETS if p['id'] == body.style), {})
+                bg = preset.get('background', '#ffffff')
+                bg_color = 'white' if bg.lower() in ('#ffffff', '#fff', 'white') else 'black' if bg.lower() in ('#000000', '#000', 'black') else ('0x' + bg[1:] if bg.startswith('#') else bg)
                 try:
                     await media_jobs.process(['ffmpeg', '-nostdin', '-v', 'error', '-y', '-i', str(raw), '-an', '-vf',
-                        f'{timing}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps=30{tail},format=yuv420p',
+                        f'{timing}scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={bg_color},fps=30{tail},format=yuv420p',
                         '-t', str(length), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-movflags', '+faststart', str(temporary)], timeout=300)
                     temporary.replace(target)
                 finally:
                     temporary.unlink(missing_ok=True)
             else:
                 image = await studio.image_file(vid, row[f'{prefix}_image_media_id'])
-                await studio.image_clip(image, target, voice['duration'], body.orientation, body.motion)
+                preset = next((p for p in studio.PRESETS if p['id'] == body.style), {})
+                bg = preset.get('background', '#ffffff')
+                bg_color = 'white' if bg.lower() in ('#ffffff', '#fff', 'white') else 'black' if bg.lower() in ('#000000', '#000', 'black') else ('0x' + bg[1:] if bg.startswith('#') else bg)
+                await studio.image_clip(image, target, voice['duration'], body.orientation, body.motion, bg_color=bg_color)
         info = await pacing.probe(target)
         if abs(info['duration']-length) > .06:
             raise ValueError(f'Cảnh {index+1} bị lệch thời lượng. Chưa xuất bản.')

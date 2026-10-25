@@ -10,7 +10,8 @@
     "webRequest",
     "scripting",
     "declarativeNetRequest",
-    "sidePanel"
+    "sidePanel",
+    "debugger"
   ],
   "host_permissions": [
     "https://flow.google.com/*",

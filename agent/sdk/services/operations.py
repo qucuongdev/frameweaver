@@ -910,12 +910,41 @@ class OperationService:
 # ------------------------------------------------------------------
 
 async def _build_video_prompt(base_prompt: str, scene: dict, project_id: str | None) -> str:
-    """Enhance video prompt with Veo 3 audio instructions and negative prompt."""
-    parts = [base_prompt.strip()]
+    """Enhance video prompt with material style, Veo 3 audio instructions and negative prompt."""
+    parts = []
+
+    # Check project-level material and audio flags
+    mat_style = ""
+    mat_neg = ""
+    allow_music = False
+    allow_voice = False
+    project = None
+    if project_id:
+        project = await crud.get_project(project_id)
+        if project:
+            if project.get("allow_music"):
+                allow_music = True
+            if project.get("allow_voice"):
+                allow_voice = True
+            mat_id = project.get("material")
+            if mat_id:
+                try:
+                    from agent.materials import get_material
+                    mat = get_material(mat_id)
+                    if mat:
+                        mat_style = mat.get("style_instruction") or mat.get("scene_prefix") or ""
+                        mat_neg = mat.get("negative_prompt") or ""
+                except Exception:
+                    pass
+
+    prompt_lower = base_prompt.lower()
+    if mat_style and not any(kw in prompt_lower for kw in ("stickman", "line illustration", "minimal black line", "flat black line")):
+        parts.append(mat_style.strip())
+
+    parts.append(base_prompt.strip())
 
     # Only append voice context when video_prompt contains dialogue (verb-based detection)
     dialogue_verbs = ("says", "whispers", "shouts", "asks", "replies", "murmurs", "exclaims", "gasps", "laughs", "mutters")
-    prompt_lower = base_prompt.lower()
     has_dialogue = any(verb in prompt_lower for verb in dialogue_verbs)
     if project_id and has_dialogue:
         char_names_raw = scene.get("character_names")
@@ -934,17 +963,6 @@ async def _build_video_prompt(base_prompt: str, scene: dict, project_id: str | N
             if voices:
                 parts.append("Character voices: " + ". ".join(voices) + ".")
 
-    # Check project-level audio flags — Veo 3 Audio label format
-    allow_music = False
-    allow_voice = False
-    if project_id:
-        project = await crud.get_project(project_id)
-        if project:
-            if project.get("allow_music"):
-                allow_music = True
-            if project.get("allow_voice"):
-                allow_voice = True
-
     if not allow_music:
         # Only append if prompt doesn't already have Audio:/Music: labels
         if "audio:" not in prompt_lower and "music:" not in prompt_lower:
@@ -955,7 +973,14 @@ async def _build_video_prompt(base_prompt: str, scene: dict, project_id: str | N
 
     # Veo 3 negative prompt — always append unless already present
     if "negative:" not in prompt_lower:
-        parts.append("Negative: subtitles, captions, watermark, text on screen, logo, blurry faces, distorted hands.")
+        neg_items = ["subtitles", "captions", "watermark", "text on screen", "logo"]
+        if mat_neg:
+            neg_items.append(mat_neg)
+            if "stickman" in str(project_id or "") or (project and "stickman" in str(project.get("material", ""))):
+                neg_items.extend(["photorealism", "realistic humans", "realistic faces", "real actors", "3D render", "color photographs"])
+        else:
+            neg_items.extend(["blurry faces", "distorted hands"])
+        parts.append("Negative: " + ", ".join(neg_items) + ".")
 
     return " ".join(parts)
 

@@ -29,7 +29,7 @@ SETTINGS = ('style', 'orientation', 'language', 'character_id', 'engine', 'prese
 
 
 def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()[:24]
 
 
 def copy_voice(source, target):
@@ -379,13 +379,13 @@ def check_image(path):
         image.load()
 
 
-async def image_clip(image, target, duration, orientation, motion='zoom'):
+async def image_clip(image, target, duration, orientation, motion='zoom', bg_color='white'):
     width, height = (720, 1280) if orientation == 'VERTICAL' else (1280, 720)
     frames = math.ceil(duration*30-1e-6)
     # Quantized length includes the whole voice; center zoom only, at most 5%.
     zoom = f'1+0.05*on/{max(1, frames-1)}' if motion == 'zoom' else '1.06' if motion == 'pan' else '1'
     x = f'(iw-iw/zoom)*on/{max(1, frames-1)}' if motion == 'pan' else 'iw/2-iw/zoom/2'
-    graph = (f'scale={width*2}:{height*2}:force_original_aspect_ratio=increase,crop={width*2}:{height*2},'
+    graph = (f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={bg_color},'
              f"zoompan=z='{zoom}':x='{x}':y='ih/2-ih/zoom/2':d={frames}:s={width}x{height}:fps=30,format=yuv420p")
     temporary = target.with_name(f'.{target.stem}.rendering.mp4')
     try:
@@ -508,11 +508,13 @@ async def generate_voices(vid, body, project, scenes, update):
                 state['accepting'] = False
         for scene, voice in zip(subset, voices):
             if voice['status'] != 'COMPLETED' or not voice.get('duration') or not .1 <= voice['duration'] <= 90:
-                raise ValueError(f"Cảnh {scene['display_order']} chưa có giọng hợp lệ hoặc dài hơn 90 giây. Bấm tiếp tục để tạo phần còn thiếu.")
+                err = voice.get('error') or 'Chưa có giọng hợp lệ hoặc dài hơn 90 giây'
+                raise ValueError(f"Cảnh {scene['display_order']}: {err}. Bấm tiếp tục để tạo phần còn thiếu.")
             # Existing TTS cache can be replaced on text edits. Keep old editor assets immutable.
             source = Path(voice['audio_path'])
             signature = speech_store.read_json(Path(str(source)+'.json'), {}).get('signature')
-            target = directory(vid)/'voices'/f"{digest(['frame-padded-v1', scene['narrator_text'], body.engine, preset, body.speed, signature or voice['duration']])}.wav"
+            scene_text = "".join(c for c in (scene.get('narrator_text') or '') if not (0xD800 <= ord(c) <= 0xDFFF))
+            target = directory(vid)/'voices'/f"{digest(['frame-padded-v1', scene_text, body.engine, preset, body.speed, signature or voice['duration']])}.wav"
             target.parent.mkdir(parents=True, exist_ok=True)
             if not tts.wav_duration(target):
                 temporary = target.with_suffix('.copying.wav')

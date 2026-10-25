@@ -71,7 +71,7 @@ async def finish_audio_mix(vid: str, orientation: str | None, mix_update: dict,
         mix_dir = project_dir / "audio_mix"
         settings_path = mix_dir / f"{vid}.json"
         try:
-            settings = json.loads(settings_path.read_text()) if settings_path.is_file() else {}
+            settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.is_file() else {}
         except (OSError, json.JSONDecodeError) as exc:
             raise AudioMixError(409, "Could not read saved audio settings; the previous export was kept") from exc
         if not isinstance(settings, dict):
@@ -219,7 +219,7 @@ async def finish_audio_mix(vid: str, orientation: str | None, mix_update: dict,
                         "revision": edit_export["revision"], "settings": editor.model_dump(mode='json'),
                         'export_id': edit_export.get('export_id'), 'bytes': output.stat().st_size}
             staged_settings = work_dir / "settings.json"
-            staged_settings.write_text(json.dumps(settings, indent=2, ensure_ascii=False))
+            staged_settings.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
             check_cancelled()
             source.replace(output)
             staged_settings.replace(settings_path)

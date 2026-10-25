@@ -41,7 +41,7 @@ def local_source(vid: str) -> Path:
 async def audio_settings(item: dict) -> dict:
     project = await crud.get_project(item["project_id"])
     path = OUTPUT_DIR / slugify(project.get("name") or "unnamed_project") / "audio_mix" / f"{item['id']}.json"
-    data = json.loads(path.read_text()) if path.is_file() else {}
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     if not isinstance(data, dict):
         raise ValueError("Cấu hình âm thanh không hợp lệ.")
     return data

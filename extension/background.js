@@ -151,6 +151,66 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ['requestHeaders', 'extraHeaders'],
 );
 
+// Capture real batchexecute headers for diagnosis
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    try {
+      const headers = (details.requestHeaders || []).map(h => `${h.name}: ${h.value}`);
+      if (details.url.includes('StreamChat') || details.url.includes('batchexecute')) {
+        const payload = {
+          direction: 'headers_captured',
+          url: details.url,
+          headers,
+          timestamp: Date.now()
+        };
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'captured_flow', data: payload }));
+        }
+      }
+    } catch (e) {}
+  },
+  { urls: ['https://flow.google.com/*', 'https://flow.google.com/_/*'] },
+  ['requestHeaders', 'extraHeaders']
+);
+
+let _uiGenerateListener = null;
+
+// Capture real batchexecute requests for diagnosis and UI generation interception
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    try {
+      if (details.method !== 'POST') return;
+      const raw = details.requestBody?.raw;
+      let bodyText = '';
+      if (raw && raw.length > 0) {
+        bodyText = new TextDecoder('utf-8').decode(new Uint8Array(raw[0].bytes));
+      } else if (details.requestBody?.formData) {
+        bodyText = JSON.stringify(details.requestBody.formData);
+      }
+      if (bodyText && bodyText.includes('f.req')) {
+        const payload = {
+          direction: 'request_webrequest',
+          url: details.url,
+          body: bodyText,
+          timestamp: Date.now()
+        };
+        metrics.capturedFlow = payload;
+        chrome.storage.local.set({ metrics });
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'captured_flow', data: payload }));
+        }
+
+        if (_uiGenerateListener) {
+          // Do NOT match as29s here - as29s polls existing media on the page.
+          // Real generation responses are captured in FLOW_REQUEST_CAPTURED below.
+        }
+      }
+    } catch (e) {}
+  },
+  { urls: ['https://flow.google.com/*', 'https://flow.google.com/_/*'] },
+  ['requestBody']
+);
+
 let _openingFlowTab = false;
 
 async function captureTokenFromFlowTab({ createIfMissing = false } = {}) {
@@ -239,12 +299,39 @@ function connectToAgent() {
 
       if (msg.method === 'batch_rpc') {
         await handleBatchRpc(msg);
+      } else if (msg.method === 'ui_generate') {
+        await handleUiGenerate(msg);
       } else if (msg.method === 'api_request') {
         await handleApiRequest(msg);
       } else if (msg.method === 'trpc_request') {
         await handleTrpcRequest(msg);
       } else if (msg.method === 'solve_captcha') {
         await handleSolveCaptcha(msg);
+      } else if (msg.method === 'reload_extension') {
+        sendToAgent({ id: msg.id, result: 'reloading' });
+        setTimeout(() => chrome.runtime.reload(), 100);
+      } else if (msg.method === 'eval_dom') {
+        try {
+          const tabs = await chrome.tabs.query({ url: flowUrls });
+          let tab = tabs.find((t) => !t.discarded) || tabs[0];
+          if (!tab) { sendToAgent({ id: msg.id, status: 503, error: 'NO_FLOW_TAB' }); return; }
+          const code = msg.params?.code || 'return document.title;';
+          const [res] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            world: 'MAIN',
+            func: (scriptCode) => {
+              try {
+                return { ok: true, value: new Function(scriptCode)() };
+              } catch (e) {
+                return { ok: false, error: e.message };
+              }
+            },
+            args: [code]
+          });
+          sendToAgent({ id: msg.id, status: 200, result: res?.result });
+        } catch (e) {
+          sendToAgent({ id: msg.id, status: 500, error: e.message });
+        }
       } else if (msg.method === 'get_status') {
         sendToAgent({
           id: msg.id,
@@ -476,6 +563,33 @@ async function handleSolveCaptcha(msg) {
 const CAPTCHA_SLOT = '__CAPTCHA__';
 const MAX_RPC_TEXT = 32000000; // the project listing alone is past 17 MB
 
+async function clickElementViaDebugger(tabId, x, y) {
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x,
+      y,
+      button: 'left',
+      clickCount: 1
+    });
+    await sleep(60);
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x,
+      y,
+      button: 'left',
+      clickCount: 1
+    });
+    await sleep(50);
+    await chrome.debugger.detach({ tabId });
+    return { ok: true };
+  } catch (err) {
+    try { await chrome.debugger.detach({ tabId }); } catch(e){}
+    return { error: err?.message || String(err) };
+  }
+}
+
 async function runBatchRpc(cmd) {
   const tabs = await chrome.tabs.query({ url: flowUrls });
   let candidate = tabs.find((t) => !t.discarded) || tabs[0];
@@ -526,7 +640,8 @@ async function runBatchRpc(cmd) {
     world: 'MAIN',
     args: [cmd.rpcid, freq, MAX_RPC_TEXT, cmd.match || null],
     func: async (rpcid, freqStr, maxText, match) => {
-      const wiz = globalThis.WIZ_global_data || {};
+      try {
+        const wiz = globalThis.WIZ_global_data || {};
       const at = wiz.SNlM0e;
       const sid = wiz.FdrFJe;
       const bl = wiz.cfb2h;
@@ -536,11 +651,15 @@ async function runBatchRpc(cmd) {
       // image generation when source-path is missing even though Lite may not.
       const sourcePath = location.pathname || '/';
       const hl = (document.documentElement.lang || navigator.language || 'en').split('-')[0];
-      const url =
-        `/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=${encodeURIComponent(rpcid)}` +
-        `&source-path=${encodeURIComponent(sourcePath)}` +
-        `&bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}` +
-        `&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`;
+      const isStream = rpcid.includes('StreamChat') || rpcid.includes('FlowCreationAgentService');
+      const url = isStream
+        ? `/_/AiSandboxAngularFrontend/data/google.internal.labs.aisandbox.proto.flow.agent.v1.FlowCreationAgentService/StreamChat` +
+          `?bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}` +
+          `&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`
+        : `/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=${encodeURIComponent(rpcid)}` +
+          `&source-path=${encodeURIComponent(sourcePath)}` +
+          `&bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}` +
+          `&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`;
       const resp = await fetch(url, {
         method: 'POST',
         credentials: 'include',
@@ -563,6 +682,9 @@ async function runBatchRpc(cmd) {
         };
       }
       return { status: resp.status, text: text.slice(0, maxText) };
+      } catch (err) {
+        return { error: err?.message || String(err), stack: err?.stack };
+      }
     },
   });
 
@@ -616,6 +738,201 @@ async function handleBatchRpc(msg) {
 
   chrome.storage.local.set({ metrics });
   setState('idle');
+}
+
+// ─── Native UI Generation Bridge (reCAPTCHA Enterprise bypass) ───
+
+async function handleUiGenerate(msg) {
+  const { id, params } = msg;
+  const { prompt, type = 'IMAGE', aspect_ratio = 'LANDSCAPE', project_id } = params || {};
+  if (!prompt) {
+    sendToAgent({ id, status: 400, error: 'PROMPT_REQUIRED' });
+    return;
+  }
+
+  setState('running');
+  const tabs = await chrome.tabs.query({ url: flowUrls });
+  let tab = null;
+  if (project_id) {
+    tab = tabs.find((t) => t.url?.includes(project_id) && !t.discarded) ||
+          tabs.find((t) => t.url?.includes(project_id));
+  }
+  if (!tab) {
+    tab = tabs.find((t) => !t.discarded) || tabs[0];
+  }
+  if (!tab) {
+    setState('idle');
+    sendToAgent({ id, status: 503, error: 'NO_FLOW_TAB' });
+    return;
+  }
+
+  if (project_id && tab.url && !tab.url.includes(project_id)) {
+    try {
+      await chrome.tabs.update(tab.id, { url: `https://flow.google.com/project/${project_id}`, active: true });
+      await sleep(3500);
+      tab = await chrome.tabs.get(tab.id);
+    } catch {}
+  }
+
+  try {
+    if (tab.windowId != null) {
+      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    }
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    await sleep(200);
+
+    let capturedResult = null;
+    let captureResolver = null;
+    const capturePromise = new Promise((resolve) => {
+      captureResolver = resolve;
+    });
+
+    _uiGenerateListener = (reqType, payload) => {
+      if (reqType === type && !capturedResult) {
+        capturedResult = payload;
+        if (captureResolver) captureResolver(payload);
+      }
+    };
+    _uiGenerateListener.projectId = project_id;
+    _uiGenerateListener.type = type;
+
+    // 1. Prepare prompt box & check mode
+    const [prep] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      args: [type, aspect_ratio],
+      func: async (targetType) => {
+        const closeBtn = Array.from(document.querySelectorAll('button')).find(b =>
+          b.innerText?.includes('close') || b.getAttribute('aria-label') === 'Close'
+        );
+        if (closeBtn && document.querySelector('FLOW-SETTINGS-VIEW')) {
+          closeBtn.click();
+          await new Promise(r => setTimeout(r, 200));
+        }
+
+        const box = document.querySelector('FLOW-BASE-PROMPT-BOX') || document.body;
+        const trigger = box.querySelector('.settings-trigger-button') ||
+          Array.from(box.querySelectorAll('button')).find(b =>
+            b.innerText?.includes('Video') || b.innerText?.includes('Banana') || b.getAttribute('aria-label') === 'Settings trigger'
+          );
+
+        const currentText = trigger?.innerText || '';
+        const isVideoNow = currentText.includes('Video');
+        const wantVideo = (targetType === 'VIDEO');
+
+        if (isVideoNow !== wantVideo && trigger) {
+          const r = trigger.getBoundingClientRect();
+          return {
+            needSwitch: true,
+            triggerX: Math.round(r.left + r.width / 2),
+            triggerY: Math.round(r.top + r.height / 2),
+          };
+        }
+
+        return { needSwitch: false };
+      }
+    });
+
+    if (prep?.result?.needSwitch) {
+      await clickElementViaDebugger(tab.id, prep.result.triggerX, prep.result.triggerY);
+      await sleep(400);
+
+      const [overlayRes] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        args: [type],
+        func: (targetType) => {
+          const btns = Array.from(document.querySelectorAll('.cdk-overlay-container button, .cdk-overlay-container [role="button"], .cdk-overlay-container mat-button-toggle'));
+          const keyword = (targetType === 'VIDEO') ? 'video' : 'image';
+          const match = btns.find(b => b.innerText?.toLowerCase().includes(keyword));
+          if (!match) return { error: `NO_${keyword.toUpperCase()}_BUTTON` };
+          const r = match.getBoundingClientRect();
+          return {
+            ok: true,
+            x: Math.round(r.left + r.width / 2),
+            y: Math.round(r.top + r.height / 2)
+          };
+        }
+      });
+
+      if (overlayRes?.result?.ok) {
+        await clickElementViaDebugger(tab.id, overlayRes.result.x, overlayRes.result.y);
+        await sleep(400);
+      }
+    }
+
+    // 2. Fill ProseMirror & locate Start generation button
+    const [fillRes] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      args: [prompt],
+      func: async (textPrompt) => {
+        let pm = document.querySelector('.ProseMirror');
+        if (!pm) {
+          for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 250));
+            pm = document.querySelector('.ProseMirror');
+            if (pm) break;
+          }
+        }
+        if (!pm) return { error: 'NO_PROSEMIRROR' };
+        pm.focus();
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(pm);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand('delete');
+        pm.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: textPrompt, bubbles: true, cancelable: true }));
+        document.execCommand('insertText', false, textPrompt);
+        pm.dispatchEvent(new Event('input', { bubbles: true }));
+
+        let genBtn = document.querySelector('button[aria-label="Start generation"]');
+        if (!genBtn) {
+          for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 250));
+            genBtn = document.querySelector('button[aria-label="Start generation"]');
+            if (genBtn) break;
+          }
+        }
+        if (!genBtn) return { error: 'NO_GEN_BTN' };
+        const r = genBtn.getBoundingClientRect();
+        return {
+          ok: true,
+          submitX: Math.round(r.left + r.width / 2),
+          submitY: Math.round(r.top + r.height / 2)
+        };
+      }
+    });
+
+    if (!fillRes?.result?.ok) {
+      setState('idle');
+      sendToAgent({ id, status: 500, error: fillRes?.result?.error || 'FILL_PROMPT_FAILED' });
+      return;
+    }
+
+    // 3. Submit click via debugger
+    await clickElementViaDebugger(tab.id, fillRes.result.submitX, fillRes.result.submitY);
+
+    // 4. Wait for network capture or DOM update
+    const timeoutMs = (type === 'VIDEO') ? 260000 : 120000;
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs));
+    const captured = await Promise.race([capturePromise, timeoutPromise]);
+
+    if (captured) {
+      setState('idle');
+      sendToAgent({ id, status: 200, result: captured });
+      return;
+    }
+
+    setState('idle');
+    sendToAgent({ id, status: 504, error: 'UI_GENERATION_TIMEOUT' });
+  } catch (err) {
+    setState('idle');
+    sendToAgent({ id, status: 500, error: err?.message || String(err) });
+  } finally {
+    _uiGenerateListener = null;
+  }
 }
 
 // ─── API Request Proxy ──────────────────────────────────────
@@ -880,6 +1197,52 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
 
   if (msg.type === 'TRPC_MEDIA_URLS') {
     handleTrpcMediaUrls(msg.trpcUrl, msg.body);
+    reply({ ok: true });
+    return true;
+  }
+
+  if (msg.type === 'FLOW_REQUEST_CAPTURED') {
+    metrics.capturedFlow = msg.data;
+    chrome.storage.local.set({ metrics });
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'captured_flow', data: msg.data }));
+    }
+
+    if (_uiGenerateListener && msg.data?.direction === 'response') {
+      const url = msg.data.url || '';
+      const text = msg.data.text || '';
+      const pid = _uiGenerateListener.projectId;
+
+      if (_uiGenerateListener.type === 'IMAGE' && (url.includes('ogiZ0b') || url.includes('StreamChat') || url.includes('bOKtO'))) {
+        const matches = text.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi) || [];
+        const newIds = matches.filter(id => id.toLowerCase() !== pid?.toLowerCase());
+        if (newIds.length > 0) {
+          const generatedId = newIds[0];
+          console.log('[FrameWeaver] Captured fresh IMAGE from response:', generatedId);
+          _uiGenerateListener('IMAGE', {
+            media: [{
+              name: generatedId,
+              media_id: generatedId,
+              url: `https://flow-content.google/image/${generatedId}`
+            }]
+          });
+        }
+      } else if (_uiGenerateListener.type === 'VIDEO' && (url.includes('YhhmEf') || url.includes('eb1hJf') || url.includes('ngNC2') || url.includes('as29s'))) {
+        const matches = text.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi) || [];
+        const newIds = matches.filter(id => id.toLowerCase() !== pid?.toLowerCase());
+        if (newIds.length > 0) {
+          const generatedId = newIds[0];
+          console.log('[FrameWeaver] Captured fresh VIDEO from response:', generatedId);
+          _uiGenerateListener('VIDEO', {
+            operations: [{
+              operation: { name: generatedId },
+              status: 'MEDIA_GENERATION_STATUS_PENDING'
+            }]
+          });
+        }
+      }
+    }
+
     reply({ ok: true });
     return true;
   }

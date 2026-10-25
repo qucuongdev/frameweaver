@@ -37,7 +37,7 @@ def main():
                 for key in ("af_heart", "af_bella", "am_michael", "am_puck", "bf_emma", "bm_george"):
                     (us if key[0] == "a" else gb).load_voice(key)
                 pipelines = {"a": us, "b": gb}
-                Path(args["ready_file"]).write_text(json.dumps({"model": args["model"], "sdk": "0.9.4", "ready_at": time.time()}))
+                Path(args["ready_file"]).write_text(json.dumps({"model": args["model"], "sdk": "0.9.4", "ready_at": time.time()}), encoding="utf-8")
             emit(event="progress", stage="model_ready")
             results = []
             for index, item in enumerate(args["items"]):
@@ -56,7 +56,7 @@ def main():
                         raise ValueError("Kokoro trả về âm thanh trống hoặc không hợp lệ.")
                     sf.write(str(staged), audio, 24000, subtype="PCM_16")
                     duration = sf.info(str(staged)).duration
-                    metadata.write_text(json.dumps({"signature": item.get("signature"), "text_hash": item.get("text_hash"), "voice": item.get("identity", args.get("identity")), "generation_seconds": round(time.monotonic() - started, 2)}, ensure_ascii=False))
+                    metadata.write_text(json.dumps({"signature": item.get("signature"), "text_hash": item.get("text_hash"), "voice": item.get("identity", args.get("identity")), "generation_seconds": round(time.monotonic() - started, 2)}, ensure_ascii=False), encoding="utf-8")
                     staged.replace(target)
                     metadata.replace(str(target) + ".json")
                     result = {"id": item["id"], "ok": True, "path": str(target), "duration": duration, "elapsed": round(time.monotonic() - started, 2)}

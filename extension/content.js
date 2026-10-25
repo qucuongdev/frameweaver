@@ -67,3 +67,11 @@ window.addEventListener('TRPC_MEDIA_URLS', (e) => {
     body,
   }).catch(() => {});
 });
+
+// Forward captured Flow requests & responses to background.js
+window.addEventListener('FLOW_REQUEST_CAPTURED', (e) => {
+  chrome.runtime.sendMessage({
+    type: 'FLOW_REQUEST_CAPTURED',
+    data: e.detail,
+  }).catch(() => {});
+});

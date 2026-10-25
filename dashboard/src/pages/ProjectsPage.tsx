@@ -1,6 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { fetchAPI } from '../api/client'
+import { Pencil, Trash2 } from 'lucide-react'
+import { fetchAPI, patchAPI } from '../api/client'
 import type { Project } from '../types'
 import ProjectDetailPage from './ProjectDetailPage'
 import { useTranslation } from '../i18n/useTranslation'
@@ -43,16 +44,54 @@ function TierBadge({ tier, t }: { tier: string | null; t: (key: TranslationKey) 
   return <Badge variant={isTwo ? 'default' : 'secondary'}>{isTwo ? t('projects.tier2') : t('projects.tier1')}</Badge>
 }
 
-function ProjectCard({ project, onClick, t }: { project: Project; onClick: () => void; t: (key: TranslationKey, params?: Record<string, string | number>) => string }) {
+function ProjectCard({
+  project,
+  onClick,
+  onRename,
+  onDelete,
+  t,
+}: {
+  project: Project
+  onClick: () => void
+  onRename: () => void
+  onDelete: () => void
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string
+}) {
   return (
-    <Card className="py-4 gap-3 h-full cursor-pointer transition-opacity hover:opacity-90" onClick={onClick}>
+    <Card className="py-4 gap-3 h-full cursor-pointer transition-opacity hover:opacity-90 relative group" onClick={onClick}>
       <CardHeader>
         <CardTitle className="text-sm">{project.name}</CardTitle>
         {project.description && (
           <CardDescription className="text-[11px] leading-relaxed line-clamp-2">{project.description}</CardDescription>
         )}
-        <CardAction>
+        <CardAction className="flex items-center gap-1.5">
           <TierBadge tier={project.user_paygate_tier} t={t} />
+          <button
+            type="button"
+            className="p-1 rounded opacity-60 hover:opacity-100 hover:bg-neutral-200 dark:hover:bg-neutral-800 transition-all cursor-pointer flex items-center justify-center"
+            style={{ color: 'var(--muted)', border: '1px solid var(--border)' }}
+            title="Đổi tên dự án"
+            onClick={(e) => {
+              e.stopPropagation()
+              onRename()
+            }}
+          >
+            <Pencil className="size-3" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded opacity-60 hover:opacity-100 hover:bg-red-500 hover:text-white transition-all cursor-pointer flex items-center justify-center"
+            style={{ color: 'var(--muted)', border: '1px solid var(--border)' }}
+            title="Xóa dự án"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (window.confirm(`Bạn có chắc chắn muốn xóa dự án "${project.name}" không?`)) {
+                onDelete()
+              }
+            }}
+          >
+            <Trash2 className="size-3" />
+          </button>
         </CardAction>
       </CardHeader>
       <CardContent>
@@ -82,6 +121,10 @@ export default function ProjectsPage() {
   const [material, setMaterial] = useState('realistic')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [renameTarget, setRenameTarget] = useState<Project | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [renaming, setRenaming] = useState(false)
+  const [renameError, setRenameError] = useState<string | null>(null)
 
   useEffect(() => {
     fetchAPI<Project[]>('/api/projects')
@@ -128,6 +171,41 @@ export default function ProjectsPage() {
   // If there's an :id param, show detail page
   if (id) {
     return <ProjectDetailPage projectId={id} onBack={() => navigate('/projects')} />
+  }
+
+  async function handleDelete(projectId: string) {
+    try {
+      await fetchAPI(`/api/projects/${projectId}`, { method: 'DELETE' })
+      setProjects(previous => previous.filter(p => p.id !== projectId))
+    } catch (e) {
+      alert('Không thể xóa dự án: ' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  function handleStartRename(p: Project) {
+    setRenameTarget(p)
+    setRenameValue(p.name)
+    setRenameError(null)
+  }
+
+  async function handleSaveRename(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    if (!renameTarget) return
+    const newName = renameValue.trim()
+    if (!newName) {
+      setRenameError('Tên dự án không được để trống')
+      return
+    }
+    setRenaming(true)
+    try {
+      const updated = await patchAPI<Project>(`/api/projects/${renameTarget.id}`, { name: newName })
+      setProjects(previous => previous.map(p => p.id === updated.id ? { ...p, name: updated.name } : p))
+      setRenameTarget(null)
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRenaming(false)
+    }
   }
 
   const filtered = projects.filter(p => {
@@ -184,6 +262,38 @@ export default function ProjectsPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={!!renameTarget} onOpenChange={open => !open && setRenameTarget(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Đổi tên dự án</DialogTitle>
+            <DialogDescription>
+              Nhập tên mới cho dự án &quot;{renameTarget?.name}&quot;.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleSaveRename} className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="rename-project-input" className="text-xs">Tên dự án mới</label>
+              <input
+                id="rename-project-input"
+                value={renameValue}
+                onChange={e => setRenameValue(e.target.value)}
+                required
+                maxLength={200}
+                autoFocus
+                placeholder="Nhập tên dự án..."
+                className="rounded-md px-3 py-2 text-sm"
+                style={controlStyle}
+              />
+            </div>
+            {renameError && <p role="alert" className="text-xs break-words" style={{ color: 'var(--red)' }}>{renameError}</p>}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>{t('common.close')}</Button>
+              <Button type="submit" disabled={renaming || !renameValue.trim()}>{renaming ? 'Đang lưu…' : 'Lưu thay đổi'}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       {loading ? (
         <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('projects.loading')}</div>
       ) : filtered.length === 0 ? (
@@ -191,7 +301,14 @@ export default function ProjectsPage() {
       ) : (
         <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
           {filtered.map(p => (
-            <ProjectCard key={p.id} project={p} onClick={() => navigate(`/projects/${p.id}`)} t={t} />
+            <ProjectCard
+              key={p.id}
+              project={p}
+              onClick={() => navigate(`/projects/${p.id}`)}
+              onRename={() => handleStartRename(p)}
+              onDelete={() => void handleDelete(p.id)}
+              t={t}
+            />
           ))}
         </div>
       )}

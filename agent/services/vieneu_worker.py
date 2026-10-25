@@ -70,7 +70,7 @@ def main():
                 install_local_artifact_loader(Path(args["ready_file"]).parent)
                 model = Vieneu(mode="v3turbo", device="cpu", backend="onnx", precision="fp32", threads=4)
                 ready = Path(args["ready_file"])
-                ready.write_text(json.dumps({"model": args["model"], "sdk": "3.8.3", "ready_at": time.time()}))
+                ready.write_text(json.dumps({"model": args["model"], "sdk": "3.8.3", "ready_at": time.time()}), encoding="utf-8")
             emit(event="progress", stage="model_ready")
             if args.get("enroll"):
                 emit(event="progress", stage="enrolling")
@@ -79,7 +79,7 @@ def main():
                          "codes": np.asarray(codes, dtype=np.int64).tolist()}
                 destination = Path(args["voice_output"])
                 staged_voice = destination.with_suffix(".tmp")
-                staged_voice.write_text(json.dumps(voice))
+                staged_voice.write_text(json.dumps(voice), encoding="utf-8")
                 staged_voice.replace(destination)
                 args["voice"] = voice
             results = []
@@ -95,7 +95,8 @@ def main():
                     voice = item.get("voice", args.get("voice"))
                     voice = {**voice, "speaker_emb": np.asarray(voice["speaker_emb"], dtype=np.float32),
                              "codes": strip_encoder_pad_frame(np.asarray(voice["codes"], dtype=np.int64))}
-                    audio = model.infer(item["text"], voice=voice)
+                    clean_text = "".join(c for c in item["text"] if not (0xD800 <= ord(c) <= 0xDFFF))
+                    audio = model.infer(clean_text, voice=voice)
                     if not len(audio) or not np.isfinite(audio).all():
                         raise ValueError("VieNeu trả về âm thanh trống hoặc không hợp lệ.")
                     sf.write(str(staged), audio, model.sample_rate, subtype="PCM_16")
@@ -107,7 +108,7 @@ def main():
                     duration = sf.info(str(staged)).duration
                     if duration <= 0:
                         raise ValueError("Âm thanh không có thời lượng.")
-                    metadata.write_text(json.dumps({"signature": item.get("signature"), "text_hash": item.get("text_hash"), "voice": item.get("identity", args.get("identity")), "generation_seconds": round(time.monotonic() - started, 2)}, ensure_ascii=False))
+                    metadata.write_text(json.dumps({"signature": item.get("signature"), "text_hash": item.get("text_hash"), "voice": item.get("identity", args.get("identity")), "generation_seconds": round(time.monotonic() - started, 2)}, ensure_ascii=False), encoding="utf-8")
                     staged.replace(target)
                     metadata.replace(str(target) + ".json")
                     result = {"id": item["id"], "ok": True, "path": str(target), "duration": duration, "elapsed": round(time.monotonic() - started, 2)}

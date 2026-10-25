@@ -159,6 +159,28 @@ async def get_credits():
     return result.get("data", result)
 
 
+@router.post("/reload-extension")
+async def reload_extension():
+    client = get_flow_client()
+    return await client._send("reload_extension", {})
+
+
+class EvalDomRequest(BaseModel):
+    code: str
+
+
+@router.post("/eval-dom")
+async def eval_dom(body: EvalDomRequest):
+    client = get_flow_client()
+    return await client._send("eval_dom", {"code": body.code})
+
+
+@router.get("/diagnostic")
+async def run_diagnostic():
+    client = get_flow_client()
+    return await client.batch_rpc("DIAGNOSTIC", "{}")
+
+
 @router.post("/generate-image")
 async def generate_image(body: GenerateImageRequest):
     """Generate 1-4 images with an explicit Flow image model."""

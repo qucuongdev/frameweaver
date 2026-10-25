@@ -34,8 +34,11 @@ class CancellationToken:
     @staticmethod
     def _kill(pid):
         try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
+            if hasattr(os, "killpg"):
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
             pass
 
     def cancel(self):

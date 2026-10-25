@@ -15,9 +15,42 @@ const SITE_KEY = '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV';
 
 const _originalFetch = window.fetch;
 window.fetch = async function (...args) {
+  try {
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+    const opts = args[1] || {};
+    const bodyStr = opts.body ? String(opts.body) : '';
+    if (url.includes('batchexecute') && bodyStr.includes('f.req')) {
+      console.log('[FrameWeaver Captured Outgoing batchexecute]', url, bodyStr);
+      window.dispatchEvent(new CustomEvent('FLOW_REQUEST_CAPTURED', {
+        detail: {
+          direction: 'request',
+          url,
+          body: bodyStr,
+          timestamp: Date.now()
+        }
+      }));
+    }
+  } catch (err) {}
+
   const response = await _originalFetch.apply(this, args);
   try {
     const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+    if ((url.includes('batchexecute') || url.includes('StreamChat')) && response.ok) {
+      const clone = response.clone();
+      clone.text().then(text => {
+        if (text.includes('wrb.fr') || text.includes('flow-content.google') || url.includes('StreamChat')) {
+          console.log('[FrameWeaver Captured Response]', url, text.slice(0, 300));
+          window.dispatchEvent(new CustomEvent('FLOW_REQUEST_CAPTURED', {
+            detail: {
+              direction: 'response',
+              url,
+              text: text.slice(0, 50000),
+              timestamp: Date.now()
+            }
+          }));
+        }
+      }).catch(() => {});
+    }
     // Only intercept TRPC calls on labs.google that return project/flow data
     if (url.includes('/fx/api/trpc/') && response.ok) {
       const clone = response.clone();

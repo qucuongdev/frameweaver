@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, Pencil } from 'lucide-react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { fetchAPI, patchAPI, resolveMediaUrl } from '../api/client'
 import type { Project, Character, Video, Scene, Request } from '../types'
@@ -19,6 +19,7 @@ import { Progress } from '../components/ui/progress'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '../components/ui/table'
 import { Button } from '../components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog'
 
 type Tab = 'overview' | 'studio' | 'characters' | 'videos' | 'pipeline' | 'postproduction'
 const STAGE_KEYS: ('refs' | SceneStage)[] = ['refs', 'image', 'video', 'upscale']
@@ -60,6 +61,10 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
   const [referenceImageMessage, setReferenceImageMessage] = useState('')
   const [referenceImageError, setReferenceImageError] = useState(false)
   const [referenceImageTarget, setReferenceImageTarget] = useState<string | null>(null)
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [renaming, setRenaming] = useState(false)
+  const [renameError, setRenameError] = useState<string | null>(null)
   const { lastEvent } = useWebSocketContext()
 
   const handleCharacterAdded = useCallback((character: Character) => {
@@ -160,6 +165,7 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
   }
 
   async function patchProject(field: string, value: string) {
+    setProject(prev => prev ? { ...prev, [field]: value } : prev)
     await patchAPI(`/api/projects/${projectId}`, { [field]: value })
     fetchAll()
   }
@@ -186,10 +192,86 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
   return (
     <div className="flex flex-col gap-4" aria-busy={loading}>
       {loadError && <p role="alert" className="text-xs" style={{ color: 'var(--red)' }}>{loadError}</p>}
+
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Đổi tên dự án</DialogTitle>
+            <DialogDescription>
+              Nhập tên mới cho dự án &quot;{project.name}&quot;.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault()
+              const newName = renameValue.trim()
+              if (!newName) {
+                setRenameError('Tên dự án không được để trống')
+                return
+              }
+              setRenaming(true)
+              try {
+                await patchProject('name', newName)
+                setRenameOpen(false)
+              } catch (err) {
+                setRenameError(err instanceof Error ? err.message : String(err))
+              } finally {
+                setRenaming(false)
+              }
+            }}
+            className="flex flex-col gap-4"
+          >
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="rename-project-detail-input" className="text-xs">Tên dự án mới</label>
+              <input
+                id="rename-project-detail-input"
+                value={renameValue}
+                onChange={e => setRenameValue(e.target.value)}
+                required
+                maxLength={200}
+                autoFocus
+                placeholder="Nhập tên dự án..."
+                className="rounded-md px-3 py-2 text-sm"
+                style={{ background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)' }}
+              />
+            </div>
+            {renameError && <p role="alert" className="text-xs break-words" style={{ color: 'var(--red)' }}>{renameError}</p>}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setRenameOpen(false)}>{t('common.close')}</Button>
+              <Button type="submit" disabled={renaming || !renameValue.trim()}>{renaming ? 'Đang lưu…' : 'Lưu thay đổi'}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-baseline gap-3">
-            <h1 className="m-0 text-lg font-semibold" style={{ color: 'var(--text)' }}>{project.name}</h1>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="m-0 text-lg font-semibold" style={{ color: 'var(--text)' }}>
+              <EditableText
+                value={project.name}
+                onSave={v => {
+                  const trimmed = v.trim()
+                  if (trimmed && trimmed !== project.name) {
+                    patchProject('name', trimmed)
+                  }
+                }}
+                className="text-lg font-semibold"
+              />
+            </h1>
+            <button
+              type="button"
+              className="p-1 rounded opacity-50 hover:opacity-100 hover:bg-neutral-200 dark:hover:bg-neutral-800 transition-all cursor-pointer flex items-center justify-center"
+              style={{ color: 'var(--muted)', border: '1px solid var(--border)' }}
+              title="Đổi tên dự án"
+              onClick={() => {
+                setRenameValue(project.name)
+                setRenameError(null)
+                setRenameOpen(true)
+              }}
+            >
+              <Pencil className="size-3" />
+            </button>
             <Badge variant="outline">{project.material}</Badge>
             <Badge variant="outline">{projectStatusLabel(t, project.status)}</Badge>
           </div>
@@ -200,6 +282,24 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
         <div className="flex gap-2">
           <Button size="sm" onClick={() => setTab('studio')}>{t('studio.open')}</Button>
           <Button size="sm" variant="outline" onClick={() => navigate(`/?project_id=${projectId}#create-video`)}>{t('quickCreate.title')}</Button>
+          <Button size="sm" variant="outline" onClick={() => {
+            setRenameValue(project.name)
+            setRenameError(null)
+            setRenameOpen(true)
+          }}>
+            <Pencil className="size-3.5 mr-1" />
+            Đổi tên
+          </Button>
+          <Button size="sm" variant="destructive" onClick={async () => {
+            if (window.confirm(`Bạn có chắc chắn muốn xóa vĩnh viễn dự án "${project.name}" không?`)) {
+              try {
+                await fetchAPI(`/api/projects/${projectId}`, { method: 'DELETE' })
+                onBack()
+              } catch (e) {
+                alert('Không thể xóa dự án: ' + (e instanceof Error ? e.message : String(e)))
+              }
+            }
+          }}>Xóa dự án</Button>
           <Button variant="ghost" size="sm" onClick={onBack}>{t('projectDetail.back')}</Button>
         </div>
       </div>

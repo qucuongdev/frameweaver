@@ -91,49 +91,46 @@ async def _assemble_video_locked(
     clip_urls = [scene[f"{prefix}_video_url"] for scene in scenes]
     duration = sum(float(scene.get("duration") or 8) for scene in scenes)
     scene_durations = None
-    if len(scenes) == 1 and output_path is None:
-        url = clip_urls[0]
-    else:
-        output = output_path or assembled_path(video_id)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        temporary_output = output.with_name(f".{video_id}.{uuid.uuid4().hex}.assembling.mp4")
-        try:
-            with tempfile.TemporaryDirectory(prefix=f"{video_id}-", dir=output.parent) as temp_dir:
-                clip_paths = [Path(temp_dir) / f"scene-{index:04d}.mp4" for index in range(len(scenes))]
-                for index, (url, path) in enumerate(zip(clip_urls, clip_paths)):
-                    if progress_callback:
-                        progress_callback("downloading", index / len(clip_paths))
-                    await _download_clip(url, path)
-                    if progress_callback:
-                        progress_callback("downloading", (index + 1) / len(clip_paths))
-                if not publish:
-                    # Audio and captions need actual clip boundaries, not the DB's
-                    # default eight seconds (uploaded/trimmed clips can differ).
-                    scene_durations = []
-                    for scene, path in zip(scenes, clip_paths):
-                        actual = await _media_duration(str(path))
-                        if actual is None or not math.isfinite(actual) or actual <= 0:
-                            raise RuntimeError("Could not measure a scene clip for audio alignment")
-                        scene_durations.append({"id": scene["id"], "duration": actual})
-                    duration = sum(item["duration"] for item in scene_durations)
+    output = output_path or assembled_path(video_id)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = output.with_name(f".{video_id}.{uuid.uuid4().hex}.assembling.mp4")
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"{video_id}-", dir=output.parent) as temp_dir:
+            clip_paths = [Path(temp_dir) / f"scene-{index:04d}.mp4" for index in range(len(scenes))]
+            for index, (url, path) in enumerate(zip(clip_urls, clip_paths)):
                 if progress_callback:
-                    progress_callback("assembling", 0)
-                if len(clip_paths) == 1:
-                    clip_paths[0].replace(temporary_output)
-                else:
-                    merged = await merge_videos(
-                        [str(path) for path in clip_paths], str(temporary_output),
-                        **({"progress_callback": lambda value: progress_callback("assembling", value)} if progress_callback else {}),
-                    )
-                    if not merged:
-                        raise RuntimeError("ffmpeg could not join the scene clips")
+                    progress_callback("downloading", index / len(clip_paths))
+                await _download_clip(url, path)
                 if progress_callback:
-                    progress_callback("assembling", 1)
-            temporary_output.replace(output)
-        finally:
-            temporary_output.unlink(missing_ok=True)
-        # Change the URL each time so an open browser player fetches the new cut.
-        url = f"/api/videos/{video_id}/file?v={int(time.time() * 1000)}"
+                    progress_callback("downloading", (index + 1) / len(clip_paths))
+            if not publish:
+                # Audio and captions need actual clip boundaries, not the DB's
+                # default eight seconds (uploaded/trimmed clips can differ).
+                scene_durations = []
+                for scene, path in zip(scenes, clip_paths):
+                    actual = await _media_duration(str(path))
+                    if actual is None or not math.isfinite(actual) or actual <= 0:
+                        raise RuntimeError("Could not measure a scene clip for audio alignment")
+                    scene_durations.append({"id": scene["id"], "duration": actual})
+                duration = sum(item["duration"] for item in scene_durations)
+            if progress_callback:
+                progress_callback("assembling", 0)
+            if len(clip_paths) == 1:
+                clip_paths[0].replace(temporary_output)
+            else:
+                merged = await merge_videos(
+                    [str(path) for path in clip_paths], str(temporary_output),
+                    **({"progress_callback": lambda value: progress_callback("assembling", value)} if progress_callback else {}),
+                )
+                if not merged:
+                    raise RuntimeError("ffmpeg could not join the scene clips")
+            if progress_callback:
+                progress_callback("assembling", 1)
+        temporary_output.replace(output)
+    finally:
+        temporary_output.unlink(missing_ok=True)
+    # Change the URL each time so an open browser player fetches the new cut.
+    url = f"/api/videos/{video_id}/file?v={int(time.time() * 1000)}"
 
     if publish:
         # A thumbnail can be selected while ffmpeg is working. Keep that choice.

@@ -49,7 +49,7 @@ async def complete(role: dict, prompt: str, *, schema: dict, images: tuple[Path,
             if provider == "codex":
                 output = root / "answer.txt"
                 schema_path = root / "schema.json"
-                schema_path.write_text(json.dumps(_codex_schema(schema)))
+                schema_path.write_text(json.dumps(_codex_schema(schema)), encoding="utf-8")
                 args = [binary, "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check",
                         "--sandbox", "read-only", "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
                         "--disable", "shell_tool", "--disable", "apps", "--disable", "multi_agent",
@@ -62,7 +62,7 @@ async def complete(role: dict, prompt: str, *, schema: dict, images: tuple[Path,
                 if effort:
                     args += ["-c", f"model_reasoning_effort={json.dumps(effort)}"]
                 await media_jobs.process(args + ["-"], timeout=240, cwd=directory, stdin=prompt)
-                answer = output.read_text().strip() if output.is_file() else ""
+                answer = output.read_text(encoding="utf-8").strip() if output.is_file() else ""
             else:
                 if refs:
                     prompt = ("Read only these reference images with the file-reading tool: "

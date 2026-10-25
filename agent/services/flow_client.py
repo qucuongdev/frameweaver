@@ -22,6 +22,7 @@ import json
 import logging
 import time
 import uuid
+import re
 from typing import Optional
 
 from agent.config import (
@@ -69,6 +70,13 @@ class FlowClient:
         self._ws_disconnect_count = 0
         self._ws_connected_at: Optional[float] = None
         self._ws_last_disconnect_at: Optional[float] = None
+        self._ui_generate_lock: Optional[asyncio.Lock] = None
+
+    @property
+    def ui_generate_lock(self) -> asyncio.Lock:
+        if self._ui_generate_lock is None:
+            self._ui_generate_lock = asyncio.Lock()
+        return self._ui_generate_lock
 
     def set_extension(self, ws):
         """Called when extension connects via WS."""
@@ -173,6 +181,11 @@ class FlowClient:
         return any(marker in message for marker in (
             "no_flow_key",
             "no_flow_tab",
+            "no_prosemirror",
+            "no_gen_btn",
+            "fill_prompt_failed",
+            "ui_generation_timeout",
+            "timeout",
             # Batch path: this profile's Flow tab cannot sign a request — it is
             # signed out, still booting, or Chrome discarded it. Another
             # profile's tab may be perfectly able to.
@@ -237,6 +250,17 @@ class FlowClient:
 
     async def handle_message(self, data: dict, websocket=None):
         """Handle incoming message from extension."""
+        if data.get("type") == "captured_flow":
+            from pathlib import Path
+            payload_data = data.get("data")
+            with open("captured_flow.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload_data, ensure_ascii=False) + "\n")
+            # Also save request separately if it's a request
+            if isinstance(payload_data, dict) and 'request' in payload_data.get('direction', ''):
+                Path("captured_request.json").write_text(json.dumps(payload_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            logger.info(">>> CAPTURED FLOW SAVED TO captured_flow.jsonl! <<<")
+            return
+
         if data.get("type") == "token_captured":
             key = data.get("flowKey")
             source_ws = websocket or self._extension_ws
@@ -573,6 +597,24 @@ class FlowClient:
             params["match"] = match
         return await self._send("batch_rpc", params, timeout=timeout)
 
+    async def ui_generate(self, prompt: str, gen_type: str = "IMAGE",
+                          aspect_ratio: str = "LANDSCAPE",
+                          project_id: str | None = None,
+                          timeout: float | None = None) -> dict:
+        """Submit generation via Chrome debugger UI automation on the Flow tab."""
+        effective_timeout = timeout or (270.0 if gen_type == "VIDEO" else 135.0)
+        params = {
+            "prompt": prompt,
+            "type": gen_type,
+            "aspect_ratio": aspect_ratio,
+            "project_id": self._batch_project_id(project_id or FLOW_PROJECT_ID),
+        }
+        async with self.ui_generate_lock:
+            res = await self._send("ui_generate", params, timeout=effective_timeout)
+        if isinstance(res, dict) and "result" in res:
+            return res["result"]
+        return res
+
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
                              timeout: float = 300):
@@ -670,6 +712,60 @@ class FlowClient:
             async def submit_once(index: int, launch_offset: float = 0.0):
                 if launch_offset:
                     await asyncio.sleep(launch_offset)
+
+                # 1. Native UI Automation (bypasses reCAPTCHA Enterprise)
+                try:
+                    ui_res = await self.ui_generate(prompt, "IMAGE", aspect_ratio=aspect_ratio, project_id=pid)
+                    logger.info("UI image generation returned: %s", ui_res)
+                    if isinstance(ui_res, dict) and "media" in ui_res:
+                        m_list = ui_res["media"]
+                        if m_list and isinstance(m_list, list):
+                            first_m = m_list[0]
+                            mid = first_m.get("media_id") or first_m.get("name")
+                            m_url = first_m.get("url") or f"https://flow-content.google/image/{mid}"
+                            if mid:
+                                logger.info("Generated image via UI automation: %s", mid)
+                                return fb.GeneratedImage(media_id=mid, url=m_url)
+                except Exception as ui_err:
+                    logger.warning("UI image generation failed, falling back: %s", ui_err)
+
+                # 2. Try Flow Agent StreamChat + bOKtO polling
+                try:
+                    chat_freq = fb.stream_chat_request(prompt, pid, aspect=aspect_ratio)
+                    chat_res = await self.batch_rpc(
+                        fb.RPC_STREAM_CHAT, chat_freq, captcha_action=fb.CAPTCHA_IMAGE, timeout=30
+                    )
+                    raw_text = chat_res.get("data") or ""
+                    logger.info("StreamChat response status=%s len=%d preview=%s",
+                                chat_res.get("status"), len(raw_text), repr(raw_text[:200]))
+
+                    # Check if image was returned directly
+                    direct_images = fb.read_images(raw_text)
+                    if direct_images:
+                        logger.info("Generated image directly from StreamChat: %s", direct_images[0].media_id)
+                        return direct_images[0]
+
+                    # Otherwise extract generation thread ID (filtering out project ID)
+                    thread_ids = [
+                        t for t in re.findall(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', raw_text, re.I)
+                        if t.lower() != pid.lower()
+                    ]
+                    if thread_ids:
+                        target_thread = thread_ids[0]
+                        logger.info("Polling Flow Agent media for thread: %s", target_thread)
+                        for _ in range(30):
+                            await asyncio.sleep(2)
+                            media_freq = fb.agent_media_request(target_thread)
+                            media_res = await self.batch_rpc(fb.RPC_AGENT_MEDIA, media_freq, timeout=30)
+                            poll_payload = fb.first_payload(media_res.get("data") or "", fb.RPC_AGENT_MEDIA)
+                            generated = fb.read_images(poll_payload)
+                            if generated:
+                                logger.info("Generated image via Flow Agent bOKtO: %s", generated[0].media_id)
+                                return generated[0]
+                except Exception as stream_err:
+                    logger.warning("StreamChat generation attempt failed, falling back to legacy RPC: %s", stream_err)
+
+                # 2. Fallback to legacy RPC
                 request_seed = seed + index * 9973 if seed is not None else None
                 freq = fb.image_request(
                     prompt, pid, count=1, aspect=aspect_ratio, seed=request_seed,
@@ -824,8 +920,23 @@ class FlowClient:
                 str(scene_id)[:12], end_image_media_id[:12])
 
         gen_type = "start_end_frame_2_video" if end_image_media_id else "frame_2_video"
+        pid = self._batch_project_id(project_id)
+
+        # 1. Native UI Automation (bypasses reCAPTCHA Enterprise)
         try:
-            pid = self._batch_project_id(project_id)
+            ui_res = await self.ui_generate(prompt, "VIDEO", aspect_ratio=aspect_ratio, project_id=pid)
+            if isinstance(ui_res, dict) and "operations" in ui_res:
+                ops = ui_res["operations"]
+                if ops and isinstance(ops, list):
+                    op_name = (ops[0].get("operation") or {}).get("name") or ops[0].get("name")
+                    if op_name:
+                        self._remember_operation(op_name, pid)
+                        return {"status": 200, "data": {"operations": ops}}
+        except Exception as ui_err:
+            logger.warning("UI video generation failed, falling back: %s", ui_err)
+
+        # 2. Fallback to legacy RPC
+        try:
             freq = fb.video_request(
                 prompt, pid, start_image_media_id, aspect=aspect_ratio,
                 model=video_model or self._batch_video_model(user_paygate_tier, gen_type, aspect_ratio),
@@ -905,6 +1016,21 @@ class FlowClient:
         return {"status": 200, "data": {"operations": out}}
 
     async def _poll_batch_operation(self, operation_id: str) -> dict:
+        # Flow text-to-video operations share the same UUID as the media itself.
+        try:
+            direct_urls = await self._batch_media_urls(operation_id)
+            if direct_urls.video:
+                self._operation_media[operation_id] = operation_id
+                return {
+                    "operation": {
+                        "name": operation_id,
+                        "metadata": {"video": {"mediaId": operation_id, "fifeUrl": direct_urls.video}},
+                    },
+                    "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+                }
+        except Exception:
+            pass
+
         media_id = self._operation_media.get(operation_id)
         complaint = None
 

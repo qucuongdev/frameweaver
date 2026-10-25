@@ -724,7 +724,7 @@ def _narration_voice_metadata(path: Path | None) -> dict | None:
     if not path:
         return None
     try:
-        data = json.loads(Path(str(path) + ".json").read_text())
+        data = json.loads(Path(str(path) + ".json").read_text(encoding="utf-8"))
         if isinstance(data, dict):
             return data.get("voice") or {"engine": "omnivoice"}
     except (OSError, ValueError):
@@ -792,7 +792,7 @@ async def delete_voice_template(name: str):
 
 def _load_templates_meta() -> dict:
     if TEMPLATES_META.exists():
-        return json.loads(TEMPLATES_META.read_text())
+        return json.loads(TEMPLATES_META.read_text(encoding="utf-8"))
     return {}
 
 

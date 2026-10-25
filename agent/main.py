@@ -5,6 +5,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -103,6 +109,30 @@ async def lifespan(app: FastAPI):
     # healthy API with a silently failed background task on the extension port.
     try:
         ws_server = await websockets.serve(ws_handler, WS_HOST, WS_PORT)
+    except OSError as e:
+        if "10048" in str(e) or getattr(e, "errno", None) == 10048:
+            logger.warning("Port %d is occupied by an older process, attempting automatic release...", WS_PORT)
+            try:
+                import psutil
+                my_pid = os.getpid()
+                for p in psutil.process_iter(["pid", "name"]):
+                    if p.info["pid"] == my_pid:
+                        continue
+                    try:
+                        for c in p.net_connections("inet"):
+                            if c.laddr and c.laddr.port == WS_PORT:
+                                logger.info("Terminating old process %d occupying port %d", p.info["pid"], WS_PORT)
+                                p.kill()
+                                break
+                    except Exception:
+                        pass
+            except Exception as kill_err:
+                logger.warning("Failed scanning port %d: %s", WS_PORT, kill_err)
+            await asyncio.sleep(0.6)
+            ws_server = await websockets.serve(ws_handler, WS_HOST, WS_PORT)
+        else:
+            await close_db()
+            raise
     except Exception:
         await close_db()
         raise
@@ -267,6 +297,24 @@ async def dashboard_ws(websocket: WebSocket):
 if __name__ == "__main__":
     import os
     import uvicorn
+
+    # Automatically clean up any orphan process occupying our ports on Windows
+    try:
+        import psutil
+        my_pid = os.getpid()
+        for p in psutil.process_iter(["pid", "name"]):
+            if p.info["pid"] == my_pid:
+                continue
+            try:
+                for c in p.net_connections("inet"):
+                    if c.laddr and c.laddr.port in (API_PORT, WS_PORT):
+                        p.kill()
+                        break
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     reload_enabled = os.environ.get("GLA_RELOAD", "0") == "1"
     uvicorn.run(
         "agent.main:app",

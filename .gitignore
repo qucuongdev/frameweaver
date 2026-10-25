@@ -67,3 +67,7 @@ dist-ssr/
 __MACOSX/
 .idea/
 .vscode/
+
+scratch/
+captured_flow.jsonl
+captured_request.json

@@ -4,8 +4,8 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import re
-import selectors
 import subprocess
 import sys
 import tempfile
@@ -41,7 +41,7 @@ def narration_matches_text(audio_path: str | Path, narrator_text: str | None) ->
     if not narrator_text:
         return False
     try:
-        metadata = json.loads(Path(str(audio_path) + ".json").read_text())
+        metadata = json.loads(Path(str(audio_path) + ".json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
     text_hash = hashlib.sha256(narrator_text.encode("utf-8")).hexdigest()
@@ -52,7 +52,7 @@ def _voice_signature(instruct, ref_audio, ref_text, speed, engine="omnivoice", p
     """Include the model and reference contents: a saved template can be replaced."""
     if engine in {"vieneu", "kokoro", "qwen3"}:
         from agent.services.speech_voices import engine_service
-        return json.dumps({**engine_service(engine).voice_identity(preset_id), "speed": speed}, ensure_ascii=False, sort_keys=True)
+        return json.dumps({**engine_service(engine).voice_identity(preset_id), "speed": speed}, ensure_ascii=True, sort_keys=True)
     if engine != "omnivoice":
         raise ValueError("Unknown TTS engine")
     reference_hash = None
@@ -63,7 +63,7 @@ def _voice_signature(instruct, ref_audio, ref_text, speed, engine="omnivoice", p
         "model": TTS_MODEL, "sample_rate": TTS_SAMPLE_RATE,
         "instruct": None if ref_audio and ref_text else instruct,
         "ref_audio_hash": reference_hash, "ref_text": ref_text, "speed": speed,
-    }, ensure_ascii=False, sort_keys=True)
+    }, ensure_ascii=True, sort_keys=True)
 
 # Inline script template for TTS generation via subprocess
 _TTS_SCRIPT = """
@@ -242,9 +242,6 @@ def _run_tts_subprocess(args: dict, progress_callback: Optional[Callable[[dict],
 
         assert proc.stdout is not None
         assert proc.stdin is not None
-        selector = selectors.DefaultSelector()
-        selector.register(proc.stdout, selectors.EVENT_READ)
-        pending = b""
 
         def write_request():
             try:
@@ -269,36 +266,44 @@ def _run_tts_subprocess(args: dict, progress_callback: Optional[Callable[[dict],
             if isinstance(event, dict) and event.get("event") == "progress" and progress_callback:
                 progress_callback(event)
 
+        line_queue: queue.Queue = queue.Queue()
+
+        def read_stdout():
+            try:
+                for raw_line in iter(proc.stdout.readline, b""):
+                    line_queue.put(raw_line)
+            except Exception:
+                pass
+            finally:
+                line_queue.put(None)
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+
         try:
-            while selector.get_map():
+            while True:
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     proc.kill()
                     raise subprocess.TimeoutExpired(proc.args, timeout)
-                events = selector.select(min(1.0, remaining))
-                if not events and proc.poll() is not None:
+                try:
+                    raw_line = line_queue.get(timeout=min(1.0, remaining))
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                if raw_line is None:
                     break
-                for key, _ in events:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        if pending:
-                            consume_line(pending)
-                            pending = b""
-                        continue
-                    pending += chunk
-                    while b"\n" in pending:
-                        line, pending = pending.split(b"\n", 1)
-                        consume_line(line)
+                consume_line(raw_line)
             proc.wait(timeout=max(1.0, timeout - (time.monotonic() - started)))
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
             return {"ok": False, "error": f"TTS generation exceeded {timeout} seconds"}
         finally:
-            selector.close()
             proc.stdout.close()
             writer.join(timeout=5)
+            reader.join(timeout=1)
 
         stderr_file.seek(0)
         stderr_text = stderr_file.read()
@@ -348,12 +353,15 @@ async def generate_video_narration(
         if not narrator_text:
             continue
 
+        # Sanitize any surrogate characters that may have entered from legacy decoded text
+        narrator_text = "".join(c for c in narrator_text if not (0xD800 <= ord(c) <= 0xDFFF))
+
         wav_path = str(out_dir / f"scene_{display_order:03d}_{scene_id}.wav")
         signature = hashlib.sha256((signature_data + "\n" + narrator_text).encode("utf-8")).hexdigest()
         text_hash = hashlib.sha256(narrator_text.encode("utf-8")).hexdigest()
         cached_path = narration_path_for_scene(out_dir, scene)
         try:
-            saved_signature = json.loads(Path(str(cached_path) + ".json").read_text()).get("signature")
+            saved_signature = json.loads(Path(str(cached_path) + ".json").read_text(encoding="utf-8")).get("signature")
         except (OSError, json.JSONDecodeError, AttributeError):
             saved_signature = None
         # Reuse audio only when its text and voice settings still match.
@@ -481,9 +489,6 @@ def _run_batch_subprocess(args: dict, progress_callback: Optional[Callable[[dict
 
         assert proc.stdout is not None
         assert proc.stdin is not None
-        selector = selectors.DefaultSelector()
-        selector.register(proc.stdout, selectors.EVENT_READ)
-        pending = b""
 
         def write_request():
             try:
@@ -508,27 +513,35 @@ def _run_batch_subprocess(args: dict, progress_callback: Optional[Callable[[dict
             if isinstance(event, dict) and event.get("event") == "progress" and progress_callback:
                 progress_callback(event)
 
+        line_queue: queue.Queue = queue.Queue()
+
+        def read_stdout():
+            try:
+                for raw_line in iter(proc.stdout.readline, b""):
+                    line_queue.put(raw_line)
+            except Exception:
+                pass
+            finally:
+                line_queue.put(None)
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+
         try:
-            while selector.get_map():
+            while True:
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     proc.kill()
                     raise subprocess.TimeoutExpired(proc.args, timeout)
-                events = selector.select(min(1.0, remaining))
-                if not events and proc.poll() is not None:
+                try:
+                    raw_line = line_queue.get(timeout=min(1.0, remaining))
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                if raw_line is None:
                     break
-                for key, _ in events:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        if pending:
-                            consume_line(pending)
-                            pending = b""
-                        continue
-                    pending += chunk
-                    while b"\n" in pending:
-                        line, pending = pending.split(b"\n", 1)
-                        consume_line(line)
+                consume_line(raw_line)
             proc.wait(timeout=max(1.0, timeout - (time.monotonic() - started)))
         except subprocess.TimeoutExpired:
             proc.kill()
@@ -536,9 +549,9 @@ def _run_batch_subprocess(args: dict, progress_callback: Optional[Callable[[dict
             error = f"TTS generation timed out after {timeout} seconds"
             return [{"id": item["id"], "ok": False, "error": error} for item in args["items"]]
         finally:
-            selector.close()
             proc.stdout.close()
             writer.join(timeout=5)
+            reader.join(timeout=1)
 
         stderr_file.seek(0)
         stderr_text = stderr_file.read()

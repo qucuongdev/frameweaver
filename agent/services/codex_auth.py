@@ -77,13 +77,19 @@ class CodexSession:
     async def close(self):
         if self.proc:
             if self.proc.returncode is None:
-                with suppress(ProcessLookupError):
-                    os.killpg(self.proc.pid, signal.SIGTERM)
+                with suppress(ProcessLookupError, OSError):
+                    if hasattr(os, "killpg"):
+                        os.killpg(self.proc.pid, signal.SIGTERM)
+                    else:
+                        self.proc.terminate()
                 try:
                     await asyncio.wait_for(self.proc.wait(), 3)
                 except TimeoutError:
-                    with suppress(ProcessLookupError):
-                        os.killpg(self.proc.pid, signal.SIGKILL)
+                    with suppress(ProcessLookupError, OSError):
+                        if hasattr(os, "killpg"):
+                            os.killpg(self.proc.pid, signal.SIGKILL)
+                        else:
+                            self.proc.kill()
                     await self.proc.wait()
             if self.proc.stdin:
                 self.proc.stdin.close()

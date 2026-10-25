@@ -97,13 +97,27 @@ async def shutdown():
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+import shutil
+
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 async def process(args: list[str], *, timeout=1800, on_line=None, cwd=None, stdin=None):
     """Drain output continuously; cancellation/timeout also stops subprocess children."""
     from agent.services.export_cancel import current_token, check_cancelled
     token = current_token.get()
     check_cancelled()
+
+    resolved_args = list(args)
+    exe = shutil.which(resolved_args[0])
+    if exe:
+        resolved_args[0] = exe
+
     proc = await asyncio.create_subprocess_exec(
-        *args, cwd=cwd, start_new_session=True,
+        *resolved_args, cwd=cwd, start_new_session=True,
         stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         limit=1024 * 1024,
@@ -137,8 +151,11 @@ async def process(args: list[str], *, timeout=1800, on_line=None, cwd=None, stdi
     finally:
         if proc.returncode is None:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
+                if hasattr(os, "killpg"):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except (ProcessLookupError, OSError):
                 pass
         if token:
             token.unregister(proc.pid)

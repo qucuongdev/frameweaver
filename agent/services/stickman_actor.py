@@ -184,4 +184,4 @@ if __name__ == '__main__':
     parser.add_argument('output', type=Path)
     parser.add_argument('thumbnail', type=Path)
     args = parser.parse_args()
-    render(json.loads(args.spec.read_text()), args.audio, args.output, args.thumbnail)
+    render(json.loads(args.spec.read_text(encoding="utf-8")), args.audio, args.output, args.thumbnail)

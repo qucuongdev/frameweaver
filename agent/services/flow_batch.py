@@ -44,6 +44,9 @@ RPC_PROJECT_MEDIA = "Zzl0ze"
 RPC_MEDIA = "as29s"
 RPC_UPLOAD_IMAGE = "maseQ"
 RPC_UPSCALE_IMAGE = "SPrCad"
+RPC_STREAM_CHAT = "StreamChat"
+RPC_AGENT_POLL = "vrrFtb"
+RPC_AGENT_MEDIA = "bOKtO"
 
 CAPTCHA_IMAGE = "IMAGE_GENERATION"
 CAPTCHA_VIDEO = "VIDEO_GENERATION"
@@ -387,6 +390,30 @@ def image_request(prompt: str, project_id: str, count: int = 1,
                                           [_client_uuid()]])
 
 
+def stream_chat_request(prompt: str, project_id: str,
+                        aspect: Any = ASPECT_LANDSCAPE) -> str:
+    """Build FlowCreationAgentService/StreamChat request."""
+    aspect_num = 3 if "LANDSCAPE" in str(aspect).upper() else 2 if "PORTRAIT" in str(aspect).upper() else 1
+    client_uuid = str(uuid.uuid4())
+    proj = f"projects/{project_id}" if not str(project_id).startswith("projects/") else str(project_id)
+    inner = [
+        client_uuid,
+        [[[[prompt]]]],
+        [proj, None, [CAPTCHA_SLOT, 1], None, None, aspect_num]
+    ]
+    return json.dumps([None, json.dumps(inner, separators=(',', ':'))], separators=(',', ':'))
+
+
+def agent_poll_request(project_id: str, thread_id: str) -> str:
+    inner = [None, project_id, [thread_id]]
+    return build_envelope(RPC_AGENT_POLL, inner)
+
+
+def agent_media_request(thread_id: str) -> str:
+    inner = [None, [thread_id], [1]]
+    return build_envelope(RPC_AGENT_MEDIA, inner)
+
+
 def image_upscale_request(media_id: str, resolution: str = "2K") -> str:
     """Build the current FlowService.UpsampleImage request (RPC SPrCad)."""
     key = str(resolution).strip().upper()
@@ -575,12 +602,22 @@ def _walk_lists(node: Any):
 def read_images(payload: Any) -> list[GeneratedImage]:
     """Signed CDN urls come back inline on the image call — one per variant.
 
-    The media id is read out of the url path rather than from a fixed index:
-    the url is the thing we actually need, and pairing them at the source keeps
-    a reshuffled response from mismatching ids to pictures.
+    Supports both legacy Flow format (flow-content.google) and new Flow agent
+    format (lh3.googleusercontent.com from bOKtO / vrrFtb RPCs).
     """
     images: list[GeneratedImage] = []
     seen: set[str] = set()
+
+    for lst in _walk_lists(payload):
+        if len(lst) >= 6 and isinstance(lst[0], str) and isinstance(lst[1], str) and isinstance(lst[2], str):
+            if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', lst[0], re.I):
+                mid = lst[0]
+                if mid not in seen and isinstance(lst[5], list) and len(lst[5]) > 5:
+                    url = lst[5][5]
+                    if isinstance(url, str) and url.startswith("http"):
+                        seen.add(mid)
+                        images.append(GeneratedImage(media_id=mid, url=url))
+
     for text in _walk_strings(payload):
         if MEDIA_HOST + "/image/" not in text:
             continue

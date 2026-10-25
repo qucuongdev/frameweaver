@@ -74,7 +74,7 @@ def main():
                     local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1",
                 )
                 Path(args["ready_file"]).write_text(json.dumps({"model": args["model"], "sdk": "0.1.1",
-                                                             "device": device.upper(), "ready_at": time.time()}))
+                                                             "device": device.upper(), "ready_at": time.time()}), encoding="utf-8")
             emit(event="progress", stage="model_ready")
             results = []
             identity = args["identity"]
@@ -100,7 +100,7 @@ def main():
                     duration = sf.info(str(staged)).duration
                     metadata.write_text(json.dumps({"signature": item.get("signature"), "text_hash": item.get("text_hash"),
                                                     "voice": identity, "generation_attempts": attempts,
-                                                    "generation_seconds": round(time.monotonic() - started, 2)}, ensure_ascii=False))
+                                                    "generation_seconds": round(time.monotonic() - started, 2)}, ensure_ascii=False), encoding="utf-8")
                     staged.replace(target)
                     metadata.replace(str(target) + ".json")
                     result = {"id": item["id"], "ok": True, "path": str(target), "duration": duration,

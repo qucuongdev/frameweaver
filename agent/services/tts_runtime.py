@@ -2,7 +2,7 @@
 import asyncio
 import json
 import os
-import selectors
+import queue
 import subprocess
 import threading
 import time
@@ -99,40 +99,58 @@ class ManagedTTSWorker:
                 self.error = None
                 proc = self._process
                 payload = {**args, "model": self.model, "ready_file": str(self.cache_dir / "ready.json")}
-                data = memoryview((json.dumps(payload, ensure_ascii=False) + "\n").encode())
+                data = memoryview((json.dumps(payload, ensure_ascii=True) + "\n").encode("utf-8"))
                 while data:
                     data = data[proc.stdin.write(data):]
                 proc.stdin.flush()
                 deadline = time.monotonic() + int(os.environ.get(f"{self.engine.upper()}_LOAD_TIMEOUT", "1800")) + 240 * len(args["items"])
-                pending = b""
                 items = {item["id"]: item for item in args["items"]}
-                with selectors.DefaultSelector() as selector:
-                    selector.register(proc.stdout, selectors.EVENT_READ)
-                    while time.monotonic() < deadline:
-                        if not selector.select(timeout=1):
-                            if proc.poll() is not None:
-                                raise RuntimeError(f"Tiến trình {self.engine} đã dừng. Xem {self.cache_dir}/worker.log.")
-                            continue
-                        data = os.read(proc.stdout.fileno(), 65536)
-                        if not data:
-                            raise RuntimeError(f"{self.engine} mất kết nối. Xem {self.cache_dir}/worker.log.")
-                        pending += data
-                        while b"\n" in pending:
-                            line, pending = pending.split(b"\n", 1)
-                            event = json.loads(line)
-                            if event.get("event") == "result":
-                                if event.get("error"):
-                                    raise RuntimeError(event["error"])
-                                self.state = "ready"
-                                return event["results"]
-                            self.state = event.get("stage", "generating")
-                            if self.state == "generating" and "completed" not in event and event.get("id") in items:
-                                timeout = self._item_timeout(items[event["id"]])
-                                if timeout is not None:
-                                    deadline = time.monotonic() + timeout
-                            if callback:
-                                callback(event)
-                    raise TimeoutError(f"{self.engine} quá thời gian xử lý. Có thể thử lại từng cảnh ngắn hơn.")
+
+                line_queue = queue.Queue()
+
+                def _reader():
+                    try:
+                        for raw_line in iter(proc.stdout.readline, b""):
+                            line_queue.put(raw_line)
+                    except Exception:
+                        pass
+                    finally:
+                        line_queue.put(None)
+
+                reader_thread = threading.Thread(target=_reader, daemon=True)
+                reader_thread.start()
+
+                while time.monotonic() < deadline:
+                    try:
+                        raw_line = line_queue.get(timeout=1.0)
+                    except queue.Empty:
+                        if proc.poll() is not None:
+                            raise RuntimeError(f"Tiến trình {self.engine} đã dừng. Xem {self.cache_dir}/worker.log.")
+                        continue
+                    if raw_line is None:
+                        raise RuntimeError(f"{self.engine} mất kết nối. Xem {self.cache_dir}/worker.log.")
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line.decode("utf-8", errors="replace"))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if event.get("event") == "result":
+                        if event.get("error"):
+                            raise RuntimeError(event["error"])
+                        self.state = "ready"
+                        return event["results"]
+                    self.state = event.get("stage", "generating")
+                    if self.state == "generating" and "completed" not in event and event.get("id") in items:
+                        timeout = self._item_timeout(items[event["id"]])
+                        if timeout is not None:
+                            deadline = time.monotonic() + timeout
+                    if callback:
+                        callback(event)
+                raise TimeoutError(f"{self.engine} quá thời gian xử lý. Có thể thử lại từng cảnh ngắn hơn.")
             except Exception as exc:
                 self._stop()
                 self.error = str(exc)
