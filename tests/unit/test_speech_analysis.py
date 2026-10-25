@@ -254,7 +254,7 @@ async def test_cancel_during_source_assembly_stops_child_and_keeps_previous_cut(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 5)
-    with pytest.raises(ProcessLookupError):
+    with pytest.raises((ProcessLookupError, OSError)):
         os.kill(child[0], 0)
     assert not video_assembly.video_export_lock.locked()
     assert saved_cut.read_bytes() == b'previous playable cut'

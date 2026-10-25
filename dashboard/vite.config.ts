@@ -40,7 +40,7 @@ export default defineConfig({
   plugins: [remoteAccessGuard(), react(), tailwindcss()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   server: {

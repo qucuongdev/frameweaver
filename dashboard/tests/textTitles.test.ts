@@ -54,7 +54,7 @@ test('text split and trim preserve styling and do not mutate the starting draft'
   assert.deepEqual(next.clips.map(c => [c.start, c.duration]), [[0, 1], [1, 2]])
   assert.ok(next.clips.every(c => c.text === first.clips[0].text && c.caption?.color === first.clips[0].caption?.color))
   assert.equal(first.clips.length, 1)
-  assert.throws(() => op.layer(first, 'text', 3600), /60 phút/)
+  assert.throws(() => op.layer(first, 'text', 10800), /180 phút/)
 })
 
 test('portrait titles start at a readable size relative to the output width', () => {

@@ -78,7 +78,7 @@ const chrome = {
     sendMessage: async () => {},
     update: async () => {},
   },
-  webRequest: { onBeforeSendHeaders: event() },
+  webRequest: { onBeforeSendHeaders: event(), onBeforeRequest: event() },
 };
 
 const context = vm.createContext({

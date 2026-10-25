@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
+from urllib.request import url2pathname
 
 import aiohttp
 
@@ -32,7 +33,8 @@ async def _download_clip(url: str, target: Path) -> None:
     from agent.services.export_cancel import cancellable_download, check_cancelled
     check_cancelled()
     if url.startswith("file://"):
-        source = Path(unquote(urlparse(url).path))
+        raw_path = unquote(urlparse(url).path)
+        source = Path(url2pathname(raw_path))
         await asyncio.to_thread(shutil.copyfile, source, target)
         return
     async def download():

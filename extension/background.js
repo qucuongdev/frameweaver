@@ -176,7 +176,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 let _uiGenerateListener = null;
 
 // Capture real batchexecute requests for diagnosis and UI generation interception
-chrome.webRequest.onBeforeRequest.addListener(
+chrome.webRequest?.onBeforeRequest?.addListener(
   (details) => {
     try {
       if (details.method !== 'POST') return;

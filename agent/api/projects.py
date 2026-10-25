@@ -294,7 +294,13 @@ async def get(pid: str):
 @router.patch("/{pid}", response_model=Project)
 async def update(pid: str, body: ProjectUpdate):
     repo = _get_repo()
-    row = await repo.update("project", pid, **body.model_dump(exclude_unset=True))
+    update_data = body.model_dump(exclude_unset=True)
+    if "name" in update_data and update_data["name"] is not None:
+        trimmed = update_data["name"].strip()
+        if not trimmed:
+            raise HTTPException(400, "Project name cannot be empty")
+        update_data["name"] = trimmed
+    row = await repo.update("project", pid, **update_data)
     if not row:
         raise HTTPException(404, "Project not found")
     return repo._row_to_project(row)
